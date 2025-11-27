@@ -9,6 +9,144 @@ from typing import Optional, Union
 from bs4 import BeautifulSoup, Tag
 
 
+logger = logging.getLogger(__name__)
+
+
+def sanitize_html_attributes(html: str) -> str:
+    """
+    清理格式錯誤的 HTML 屬性。
+
+    主要處理 colspan 和 rowspan 屬性中的無效值，例如：
+    - 混合引號: colspan="27'height=colspan='3'" → colspan="3"
+    - 缺少引號: colspan="27" height="colspan=" → colspan="27" height=""
+    - 包含非數字: colspan="abc5" → colspan="5"
+    - 完全無效: colspan="invalid" → colspan="1"
+
+    Args:
+        html: 原始 HTML 字串
+
+    Returns:
+        清理後的 HTML 字串
+
+    Examples:
+        >>> sanitize_html_attributes('<td colspan="27\'height=colspan=\'3\'">Text</td>')
+        '<td colspan="3">Text</td>'
+
+        >>> sanitize_html_attributes('<td colspan="27" height="colspan=">Text</td>')
+        '<td colspan="27" height="">Text</td>'
+
+        >>> sanitize_html_attributes('<td colspan="abc5">Text</td>')
+        '<td colspan="5">Text</td>'
+
+        >>> sanitize_html_attributes('<td colspan="invalid">Text</td>')
+        '<td colspan="1">Text</td>'
+    """
+
+    # Bug #2 修復：處理缺少結束引號的情況
+    # Pattern: <td colspan="27" height="colspan=">
+    # 問題：colspan 的結束引號遺失，導致 height 屬性變成 "colspan="
+    # 修復：清空這個錯誤的 height 屬性
+    html = re.sub(
+        r'height="(colspan|rowspan)="',
+        r'height=""',
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # Bug #1 修復：處理混合引號和串接屬性
+    def extract_numeric_value(match):
+        """從屬性值中提取有效的數字"""
+        attr_name = match.group(1)
+        attr_value = match.group(2)
+
+        # 找出所有數字序列
+        numbers = re.findall(r"\d+", attr_value)
+
+        if numbers:
+            # 策略：使用最後一個數字（最右邊）
+            # 根據錯誤模式分析，最右邊的數字最可能是正確值
+            # 例如：'27\'height=colspan=\'3\'' 中，'3' 是正確的
+            numeric_value = numbers[-1]
+            logger.debug(
+                f"Extracted {attr_name}={numeric_value} from malformed value: {attr_value}"
+            )
+        else:
+            # 沒有找到數字，使用預設值
+            numeric_value = "1"
+            logger.warning(
+                f"No numeric value found in {attr_name}='{attr_value}', using default: 1"
+            )
+
+        return f'{attr_name}="{numeric_value}"'
+
+    # 清理 colspan 和 rowspan 屬性
+    # 匹配模式: (colspan|rowspan)="任何內容"
+    html = re.sub(
+        r'(colspan|rowspan)="([^"]*)"', extract_numeric_value, html, flags=re.IGNORECASE
+    )
+
+    return html
+
+
+def _safe_parse_span_attribute(cell: Tag, attr_name: str, default: int = 1) -> int:
+    """
+    安全地解析表格儲存格的 colspan 或 rowspan 屬性。
+
+    這是第二層防禦，即使 HTML 清理失敗，這裡也能容錯處理。
+
+    Args:
+        cell: BeautifulSoup Tag 物件（<td> 或 <th>）
+        attr_name: 屬性名稱（'colspan' 或 'rowspan'）
+        default: 預設值（通常是 1）
+
+    Returns:
+        解析後的整數值，失敗時回傳預設值
+
+    Examples:
+        >>> from bs4 import BeautifulSoup
+        >>> soup = BeautifulSoup('<td colspan="3">Test</td>', 'html.parser')
+        >>> _safe_parse_span_attribute(soup.td, 'colspan')
+        3
+
+        >>> soup = BeautifulSoup('<td colspan="invalid">Test</td>', 'html.parser')
+        >>> _safe_parse_span_attribute(soup.td, 'colspan')
+        1
+    """
+    if not cell.has_attr(attr_name):
+        return default
+
+    raw_value = cell.get(attr_name)
+
+    try:
+        value = int(raw_value)
+
+        # 驗證範圍：必須是正整數
+        if value <= 0:
+            logger.warning(
+                f"Invalid {attr_name} value {value} (must be positive), using default: {default}"
+            )
+            return default
+
+        return value
+
+    except (ValueError, TypeError) as e:
+        # 嘗試從字串中提取數字（容錯處理）
+        raw_str = str(raw_value)
+        match = re.search(r"\d+", raw_str)
+
+        if match:
+            extracted_value = int(match.group())
+            logger.warning(
+                f"Extracted {attr_name}={extracted_value} from malformed value: {raw_str}"
+            )
+            return extracted_value
+        else:
+            logger.warning(
+                f"Could not parse {attr_name} '{raw_str}': {e}. Using default: {default}"
+            )
+            return default
+
+
 @dataclass
 class ConversionConfig:
     """配置轉換選項"""
@@ -58,7 +196,9 @@ class HTMLToMarkdownConverter:
 
     def convert_html_str(self, html_str: str, container_selector: Optional[str] = None) -> str:
         """Convert HTML string to Markdown"""
-        soup = BeautifulSoup(html_str, "html.parser")
+        # 第一層防禦：清理格式錯誤的 HTML 屬性
+        sanitized_html = sanitize_html_attributes(html_str)
+        soup = BeautifulSoup(sanitized_html, "html.parser")
         return self.convert_html_soup(soup, container_selector)
 
     def convert_html_soup(
@@ -140,7 +280,7 @@ class HTMLToMarkdownConverter:
                     header_row_index = idx
                     # 處理 colspan
                     for th in th_cells:
-                        colspan = int(th.get("colspan", 1))
+                        colspan = _safe_parse_span_attribute(th, "colspan", 1)
                         text = th.get_text().strip()
                         if colspan > 1:
                             headers.extend([text] + [""] * (colspan - 1))
@@ -156,12 +296,14 @@ class HTMLToMarkdownConverter:
                     # 跳過 colspan 跨越整行的行（通常是標題或說明）
                     if td_cells and len(td_cells) > 1:
                         # 檢查是否所有 cell 都是 colspan=整行
-                        total_colspan = sum(int(td.get("colspan", 1)) for td in td_cells)
+                        total_colspan = sum(
+                            _safe_parse_span_attribute(td, "colspan", 1) for td in td_cells
+                        )
                         if total_colspan == len(td_cells):
                             # 找到第一個「正常」的多欄位行，當作表頭
                             header_row_index = idx
                             for td in td_cells:
-                                colspan = int(td.get("colspan", 1))
+                                colspan = _safe_parse_span_attribute(td, "colspan", 1)
                                 text = td.get_text().strip()
                                 if colspan > 1:
                                     headers.extend([text] + [""] * (colspan - 1))
@@ -189,7 +331,7 @@ class HTMLToMarkdownConverter:
                 if td_cells:
                     cells = []
                     for td in td_cells:
-                        colspan = int(td.get("colspan", 1))
+                        colspan = _safe_parse_span_attribute(td, "colspan", 1)
                         text = td.get_text().strip()
                         if colspan > 1:
                             cells.append(text)
