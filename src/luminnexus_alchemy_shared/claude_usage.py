@@ -14,9 +14,9 @@ Claude Subscription Usage Checker
     uv run claude-usage
 
 Token 來源:
-    自動從系統 Keychain 讀取 Claude Code 的 credentials
+    自動從系統讀取 Claude Code 的 credentials
     - macOS: Keychain Access
-    - Linux: GNOME Keyring (secret-tool) 或 ~/.config/claude-code/
+    - Linux: ~/.claude/credentials.json
 """
 
 import argparse
@@ -56,32 +56,17 @@ def get_credentials_macos() -> Optional[str]:
 
 
 def get_credentials_linux() -> Optional[str]:
-    """從 Linux secret-tool 取得 Claude Code credentials"""
-    try:
-        # 嘗試使用 secret-tool (GNOME Keyring)
-        result = subprocess.run(
-            ["secret-tool", "lookup", "service", "Claude Code-credentials"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
+    """從 Linux 檔案系統讀取 Claude Code credentials
 
-    # 嘗試讀取檔案 (某些 Linux 設定可能存在這裡)
-    possible_paths = [
-        Path.home() / ".config/claude-code/credentials.json",
-        Path.home() / ".claude-code/credentials.json",
-        Path.home() / ".config/Claude Code/credentials.json",
-    ]
+    Claude Code 在 Linux 上儲存 credentials 於 ~/.claude/credentials.json
+    """
+    credentials_path = Path.home() / ".claude" / "credentials.json"
 
-    for path in possible_paths:
-        if path.exists():
-            try:
-                return path.read_text().strip()
-            except Exception:
-                continue
+    if credentials_path.exists():
+        try:
+            return credentials_path.read_text().strip()
+        except Exception:
+            pass
 
     return None
 
