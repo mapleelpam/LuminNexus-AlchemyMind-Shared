@@ -13,14 +13,15 @@ Claude Subscription Usage Checker
     # 使用 uv
     uv run claude-usage
 
-設定:
-    在 .env 檔案中設定 CLAUDE_ACCESS_TOKEN
-    或透過 --token 參數傳入
+Token 來源:
+    自動從系統 Keychain 讀取 Claude Code 的 credentials
+    - macOS: Keychain Access
+    - Linux: GNOME Keyring (secret-tool) 或 ~/.config/claude-code/
 """
 
 import argparse
 import json
-import os
+import platform
 import subprocess
 import sys
 import urllib.error
@@ -29,13 +30,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
-
-# 載入 .env 檔案（從專案根目錄）
-# 優先順序：目前目錄 -> 父目錄 -> ... -> 專案根目錄
-load_dotenv()
-
-# Optional: 如果想要漂亮的輸出，rich 已經是專案依賴
 try:
     from rich.console import Console
     from rich.table import Table
@@ -98,21 +92,13 @@ def get_access_token(token_arg: Optional[str] = None) -> Optional[str]:
 
     優先順序:
     1. 命令列參數 --token
-    2. 環境變數 CLAUDE_ACCESS_TOKEN
-    3. macOS Keychain / Linux secret-tool
+    2. 系統 Keychain (macOS) / secret-tool (Linux)
     """
-    import platform
-
     # 1. 命令列參數
     if token_arg:
         return token_arg
 
-    # 2. 環境變數
-    env_token = os.environ.get("CLAUDE_ACCESS_TOKEN")
-    if env_token:
-        return env_token
-
-    # 3. 系統 Keychain
+    # 2. 系統 Keychain
     system = platform.system()
 
     if system == "Darwin":  # macOS
@@ -125,11 +111,12 @@ def get_access_token(token_arg: Optional[str] = None) -> Optional[str]:
 
     if not creds_json:
         print("❌ 找不到 Claude Code credentials")
-        print("   請設定以下任一方式:")
-        print("   1. 在 .env 檔案中設定 CLAUDE_ACCESS_TOKEN=your_token")
-        print("   2. 設定環境變數 export CLAUDE_ACCESS_TOKEN=your_token")
-        print("   3. 使用 --token 參數")
-        print("   4. 安裝並登入 Claude Code: claude login")
+        print()
+        print("   請先登入 Claude Code:")
+        print("   $ claude login")
+        print()
+        print("   或使用 --token 參數手動提供 token:")
+        print("   $ claude-usage --token sk-ant-xxx")
         return None
 
     try:
@@ -137,6 +124,7 @@ def get_access_token(token_arg: Optional[str] = None) -> Optional[str]:
         token = creds.get("claudeAiOauth", {}).get("accessToken")
         if not token:
             print("❌ Credentials 中沒有 accessToken")
+            print("   請重新登入: claude logout && claude login")
             return None
         return token
     except json.JSONDecodeError as e:
@@ -164,8 +152,7 @@ def fetch_usage(token: str) -> Optional[dict]:
     except urllib.error.HTTPError as e:
         if e.code == 401:
             print("❌ Token 已過期或無效")
-            print("   請更新 .env 中的 CLAUDE_ACCESS_TOKEN")
-            print("   或重新登入 Claude Code: claude logout && claude login")
+            print("   請重新登入 Claude Code: claude logout && claude login")
         else:
             print(f"❌ API 錯誤: HTTP {e.code}")
         return None
@@ -219,8 +206,8 @@ def print_usage_rich(usage: dict):
         period_data = usage.get(period_key)
 
         if period_data:
-            utilization = period_data.get("utilization", 0)
-            used_pct = utilization * 100
+            # utilization 已經是百分比（例如 55 代表 55%）
+            used_pct = period_data.get("utilization", 0)
             remaining_pct = max(0, 100 - used_pct)
             reset_time = format_reset_time(period_data.get("resets_at"))
 
@@ -234,7 +221,7 @@ def print_usage_rich(usage: dict):
 
             # 建立文字進度條
             bar_width = 20
-            filled = int(bar_width * utilization)
+            filled = int(bar_width * used_pct / 100)
             empty = bar_width - filled
             bar = f"[{bar_color}]{'█' * filled}[/{bar_color}][dim]{'░' * empty}[/dim]"
 
@@ -263,14 +250,14 @@ def print_usage_simple(usage: dict):
         print(f"\n📊 {period_name}:")
 
         if period_data:
-            utilization = period_data.get("utilization", 0)
-            used_pct = utilization * 100
+            # utilization 已經是百分比（例如 55 代表 55%）
+            used_pct = period_data.get("utilization", 0)
             remaining_pct = max(0, 100 - used_pct)
             reset_time = format_reset_time(period_data.get("resets_at"))
 
             # 文字進度條
             bar_width = 30
-            filled = int(bar_width * utilization)
+            filled = int(bar_width * used_pct / 100)
             empty = bar_width - filled
             bar = "█" * filled + "░" * empty
 
@@ -301,14 +288,17 @@ def main():
         description="查詢 Claude Pro/Max 訂閱用量",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Token 來源:
+  自動從系統 Keychain 讀取 (需先執行 claude login)
+
 範例:
-  claude-usage                    # 使用 .env 或 keychain 的 token
-  claude-usage --token sk-xxx     # 直接提供 token
+  claude-usage                    # 自動從 Keychain 讀取 token
+  claude-usage --token sk-xxx     # 手動提供 token
   claude-usage --json             # JSON 格式輸出
   claude-usage --simple           # 簡單文字輸出
         """,
     )
-    parser.add_argument("--token", "-t", help="直接提供 access token")
+    parser.add_argument("--token", "-t", help="手動提供 access token（覆蓋系統 Keychain）")
     parser.add_argument("--json", "-j", action="store_true", help="以 JSON 格式輸出")
     parser.add_argument("--simple", "-s", action="store_true", help="簡單文字輸出（不使用 rich）")
     args = parser.parse_args()
