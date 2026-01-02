@@ -58,9 +58,9 @@ def get_credentials_macos() -> Optional[str]:
 def get_credentials_linux() -> Optional[str]:
     """從 Linux 檔案系統讀取 Claude Code credentials
 
-    Claude Code 在 Linux 上儲存 credentials 於 ~/.claude/credentials.json
+    Claude Code 在 Linux 上儲存 credentials 於 ~/.claude/.credentials.json
     """
-    credentials_path = Path.home() / ".claude" / "credentials.json"
+    credentials_path = Path.home() / ".claude" / ".credentials.json"
 
     if credentials_path.exists():
         try:
